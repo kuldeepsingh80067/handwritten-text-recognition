@@ -1,126 +1,132 @@
 import streamlit as st
-from PIL import Image
 import numpy as np
+from PIL import Image
 import cv2
-import easyocr
-import re
+import torch
 
-# =========================
-# PAGE CONFIG
-# =========================
-st.set_page_config(page_title="Smart OCR", page_icon="🧠")
+# -------------------------------
+# 🚀 PAGE CONFIG
+# -------------------------------
+st.set_page_config(page_title="Smart OCR", page_icon="🧠", layout="wide")
 
-st.title("🧠 Smart OCR (Improved Accuracy)")
-st.markdown("Accurate • Fast • Clean UI 🚀")
+# -------------------------------
+# 🎨 CUSTOM UI
+# -------------------------------
+st.markdown("""
+    <style>
+    .main {
+        background-color: #0e1117;
+    }
+    h1 {
+        text-align: center;
+    }
+    </style>
+""", unsafe_allow_html=True)
 
-# =========================
-# LOAD MODEL
-# =========================
+st.markdown("""
+    <h1>🧠 Smart OCR (Improved Accuracy)</h1>
+    <h4 style='text-align: center; color: gray;'>Developed by Kuldeep Singh</h4>
+    <hr>
+""", unsafe_allow_html=True)
+
+# -------------------------------
+# ⚡ LOAD MODEL (FAST)
+# -------------------------------
 @st.cache_resource
 def load_model():
-    return easyocr.Reader(['en'], gpu=False)
+    from transformers import TrOCRProcessor, VisionEncoderDecoderModel
 
-reader = load_model()
+    processor = TrOCRProcessor.from_pretrained("microsoft/trocr-base-handwritten")
+    model = VisionEncoderDecoderModel.from_pretrained("microsoft/trocr-base-handwritten")
 
-# =========================
-# PREPROCESSING (IMPROVED)
-# =========================
-def preprocess_variants(img):
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    return processor, model
 
-    # Resize (important for accuracy)
-    gray = cv2.resize(gray, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
+processor, model = load_model()
 
-    # Variant 1: original gray
-    v1 = gray
+# -------------------------------
+# 🧠 IMAGE PREPROCESSING
+# -------------------------------
+def preprocess_image(image):
+    img = np.array(image)
 
-    # Variant 2: threshold
-    _, v2 = cv2.threshold(gray, 150, 255, cv2.THRESH_BINARY)
+    if len(img.shape) == 3:
+        gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+    else:
+        gray = img
 
-    # Variant 3: adaptive threshold
-    v3 = cv2.adaptiveThreshold(
-        gray, 255,
-        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-        cv2.THRESH_BINARY,
-        11, 2
-    )
+    # Improve contrast
+    gray = cv2.equalizeHist(gray)
 
-    return [v1, v2, v3]
+    # Noise removal
+    blur = cv2.GaussianBlur(gray, (5, 5), 0)
 
-# =========================
-# OCR MULTI PASS
-# =========================
-def extract_text(img):
+    # Threshold
+    _, thresh = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
 
-    variants = preprocess_variants(img)
+    return thresh
 
-    best_text = ""
-    max_len = 0
+# -------------------------------
+# 🔍 OCR FUNCTION
+# -------------------------------
+def extract_text(image):
+    processed = preprocess_image(image)
 
-    for v in variants:
-        try:
-            result = reader.readtext(v, detail=1, paragraph=True)
+    pil_img = Image.fromarray(processed).convert("RGB")
 
-            texts = []
-            for r in result:
-                try:
-                    texts.append(r[1])
-                except:
-                    continue
+    pixel_values = processor(images=pil_img, return_tensors="pt").pixel_values
 
-            text = " ".join(texts)
-            text = re.sub(r'\s+', ' ', text)
+    with torch.no_grad():
+        generated_ids = model.generate(pixel_values)
 
-            # Choose best result (longest = usually best)
-            if len(text) > max_len:
-                best_text = text
-                max_len = len(text)
+    text = processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
 
-        except:
-            continue
+    return text
 
-    return best_text
-
-# =========================
-# INPUT UI (FIXED CAMERA)
-# =========================
-st.subheader("📤 Input")
+# -------------------------------
+# 📥 INPUT SECTION
+# -------------------------------
+st.subheader("📥 Input")
 
 option = st.radio("Choose input method:", ["Upload Image", "Use Camera"])
 
 image = None
 
 if option == "Upload Image":
-    uploaded = st.file_uploader("Upload Image", type=["png", "jpg", "jpeg"])
-    if uploaded:
-        image = Image.open(uploaded)
+    uploaded_file = st.file_uploader("Upload Image", type=["png", "jpg", "jpeg"])
+    if uploaded_file:
+        image = Image.open(uploaded_file)
 
 elif option == "Use Camera":
-    camera = st.camera_input("Take Photo")
+    camera = st.camera_input("Take a photo")
     if camera:
         image = Image.open(camera)
 
-# =========================
-# PROCESS
-# =========================
+# -------------------------------
+# 🖼 SHOW IMAGE
+# -------------------------------
 if image is not None:
+    st.image(image, caption="Input Image", use_column_width=True)
 
-    st.image(image, caption="Input Image", use_container_width=True)
+    st.info("🔍 Extracting text... please wait")
 
-    img = np.array(image)
+    try:
+        text = extract_text(image)
 
-    if len(img.shape) == 3:
-        img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+        st.success("✅ Text Extracted")
 
-    with st.spinner("🔍 Extracting text..."):
-        text = extract_text(img)
+        # -------------------------------
+        # 📊 RESULT UI
+        # -------------------------------
+        st.markdown("## 📊 Result")
 
-    st.success("✅ Done!")
+        col1, col2 = st.columns(2)
+        col1.metric("Text Length", len(text))
+        col2.metric("Confidence", "High (AI Model)")
 
-    st.subheader("📄 Extracted Text")
-    st.code(text if text else "⚠ No text detected")
+        st.markdown("### 📄 Extracted Text")
+        st.code(text)
 
-    st.download_button("📥 Download Text", text, file_name="output.txt")
+        st.download_button("⬇ Download Text", text, file_name="output.txt")
 
-else:
-    st.info("👆 Select input method to start")
+    except Exception as e:
+        st.error(f"Error: {e}")
