@@ -20,7 +20,7 @@ st.set_page_config(
 st.markdown(
     """
     <h1 style='text-align: center;'>✍️ Handwritten Text Recognition</h1>
-    <p style='text-align: center; color: gray;'>AI-powered OCR with enhanced accuracy</p>
+    <p style='text-align: center; color: gray;'>AI-powered OCR with enhanced accuracy & aspect-ratio preservation</p>
     """,
     unsafe_allow_html=True
 )
@@ -28,101 +28,117 @@ st.markdown(
 st.divider()
 
 # -----------------------------
+# 🤖 LOAD OCR
+# -----------------------------
+@st.cache_resource
+def load_reader():
+    # GPU is set to False by default, switch to True if you have CUDA installed
+    return easyocr.Reader(['en'], gpu=False)
+
+reader = load_reader()
+
+# -----------------------------
 # 📥 INPUT SECTION
 # -----------------------------
 st.subheader("📥 Input")
 
-option = st.radio("Choose input method:", ["Upload Image", "Use Camera"])
-
+option = st.radio("Choose input method:", ["Upload Image", "Use Camera"], horizontal=True)
 image = None
 
 if option == "Upload Image":
-    file = st.file_uploader("Upload image", type=["png", "jpg", "jpeg"])
+    file = st.file_uploader("Upload image", type=["png", "jpg", "jpeg", "webp"])
     if file:
         image = Image.open(file)
-
 elif option == "Use Camera":
     cam = st.camera_input("Take photo")
     if cam:
         image = Image.open(cam)
 
 # -----------------------------
-# 🤖 LOAD OCR
+# 🧠 CORE PROCESSING PIPELINE
 # -----------------------------
-@st.cache_resource
-def load_reader():
-    return easyocr.Reader(['en'], gpu=False)
+def optimize_image_for_ocr(img_array):
+    """Smart preprocessing that preserves aspect ratios and cleans noise."""
+    # 1. Preserve Aspect Ratio while scaling up for better readability
+    h, w = img_array.shape[:2]
+    target_width = 1200
+    target_height = int((target_width / w) * h)
+    img_resized = cv2.resize(img_array, (target_width, target_height), interpolation=cv2.INTER_CUBIC)
 
-reader = load_reader()
+    # 2. Convert to Grayscale
+    gray = cv2.cvtColor(img_resized, cv2.COLOR_BGR2GRAY)
 
-# -----------------------------
-# 🧠 PROCESSING
-# -----------------------------
+    # 3. Denoise (Better than Gaussian Blur for text)
+    denoised = cv2.fastNlMeansDenoising(gray, h=10, searchWindowSize=21, templateWindowSize=7)
+
+    # 4. Contrast boost via CLAHE
+    clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8,8))
+    enhanced = clahe.apply(denoised)
+
+    return enhanced
+
 if image:
-
     st.divider()
-    st.subheader("🖼️ Image Preview")
-    st.image(image, use_column_width=True)
-
-    img = np.array(image)
+    
+    # Convert PIL to CV2 format safely
+    img = np.array(image.convert('RGB')) 
     img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
 
-    # Resize for stability
-    img = cv2.resize(img, (800, 600))
+    st.subheader("🖼️ Original Image")
+    st.image(image, use_column_width=True)
 
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    # Preprocess
+    base_processed = optimize_image_for_ocr(img)
 
-    # 🔥 CLAHE (contrast boost)
-    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
-    gray = clahe.apply(gray)
-
-    blur = cv2.GaussianBlur(gray, (5,5), 0)
-
-    variants = []
-
-    # Variant 1
-    _, t1 = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    variants.append(t1)
-
-    # Variant 2
-    t2 = cv2.adaptiveThreshold(
-        blur, 255,
-        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-        cv2.THRESH_BINARY, 11, 2
+    # Create intelligent variants for the OCR to try
+    variants = {}
+    
+    # Variant 1: Enhanced Grayscale (Lets EasyOCR do its own binarization)
+    variants["Enhanced Grayscale"] = base_processed
+    
+    # Variant 2: Adaptive Threshold (Great for uneven lighting / shadows on paper)
+    variants["Adaptive Threshold"] = cv2.adaptiveThreshold(
+        base_processed, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 21, 15
     )
-    variants.append(t2)
+    
+    # Variant 3: Morphological Closing (Connects broken pen strokes in handwriting)
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
+    variants["Morphological Fix"] = cv2.morphologyEx(variants["Adaptive Threshold"], cv2.MORPH_CLOSE, kernel)
 
-    # Variant 3
-    t3 = cv2.bitwise_not(t1)
-    variants.append(t3)
-
-    # Variant 4
-    kernel = np.ones((2,2), np.uint8)
-    t4 = cv2.dilate(t1, kernel, iterations=1)
-    variants.append(t4)
-
-    st.subheader("🧠 Image Processing")
-    st.image(variants, width=150)
+    with st.expander("👀 View Image Processing Variants"):
+        st.image(list(variants.values()), caption=list(variants.keys()), width=200)
 
     # -----------------------------
-    # OCR BEST RESULT
+    # 🔍 OCR EXTRACTION & SCORING
     # -----------------------------
     best_text = ""
-    best_score = 0
+    best_avg_score = 0
+    winning_variant = ""
 
-    with st.spinner("🔍 Extracting text..."):
-        for v in variants:
-            result = reader.readtext(v)
+    with st.spinner("🔍 AI is analyzing the handwriting..."):
+        for name, v in variants.items():
+            # mag_ratio=1.5 zooms in internally, contrast_ths helps with faint pencil marks
+            result = reader.readtext(v, mag_ratio=1.5, contrast_ths=0.1, adjust_contrast=0.5)
+            
+            if not result:
+                continue
 
-            text = " ".join([r[1] for r in result])
-            score = sum([r[2] for r in result]) if result else 0
+            text_parts = [r[1] for r in result]
+            confidences = [r[2] for r in result]
 
-            if score > best_score:
-                best_score = score
-                best_text = text
+            # Use AVERAGE confidence, not SUM. (Summing rewards garbage characters).
+            avg_score = sum(confidences) / len(confidences)
+            combined_text = " ".join(text_parts)
 
-    # Clean text
-    best_text = re.sub(r'[^a-zA-Z0-9 ]', '', best_text)
+            if avg_score > best_avg_score and len(combined_text.strip()) > 0:
+                best_avg_score = avg_score
+                best_text = combined_text
+                winning_variant = name
+
+    # Smart Text Cleaning: Keeps basic punctuation (.,!?'"-) unlike the previous regex
+    best_text = re.sub(r'[^\w\s.,!?\'"-]', '', best_text)
+    # Remove extra spaces
+    best_text = re.sub(r'\s+', ' ', best_text).strip()
 
     # -----------------------------
     # 📊 OUTPUT
@@ -130,30 +146,24 @@ if image:
     st.divider()
     st.subheader("📊 Result")
 
-    col1, col2 = st.columns(2)
-
+    col1, col2, col3 = st.columns(3)
     with col1:
-        st.metric("Confidence Score", round(best_score, 2))
-
+        st.metric("Confidence Score", f"{round(best_avg_score * 100, 1)}%")
     with col2:
         st.metric("Text Length", len(best_text))
+    with col3:
+        st.metric("Best Filter Used", winning_variant if winning_variant else "None")
 
-    st.success("✅ Extracted Text")
-    st.write(best_text if best_text else "No text detected ❌")
+    if best_text:
+        st.success("✅ Extracted Text")
+        # 📋 COPY + DOWNLOAD
+        st.code(best_text, language="text")
 
-    # -----------------------------
-    # 📋 COPY + DOWNLOAD
-    # -----------------------------
-    st.code(best_text)
-
-    col1, col2 = st.columns(2)
-
-    with col1:
         st.download_button(
-            "📥 Download",
-            best_text,
-            "output.txt"
+            label="📥 Download as .txt",
+            data=best_text,
+            file_name="ocr_output.txt",
+            mime="text/plain"
         )
-
-    with col2:
-        st.button("📋 Copy (Ctrl+C from above)")
+    else:
+        st.error("No text detected ❌. Try adjusting the lighting or getting closer to the paper.")
