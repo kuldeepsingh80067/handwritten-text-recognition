@@ -5,12 +5,29 @@ import cv2
 import easyocr
 import re
 
-st.set_page_config(page_title="Advanced Handwritten OCR", layout="centered")
-st.title("🚀 Advanced Handwritten Text Recognition")
+st.set_page_config(page_title="Advanced OCR", layout="centered")
+st.title("🚀 Handwritten Text Recognition")
 
-uploaded_file = st.file_uploader("Upload Image", type=["png", "jpg", "jpeg"])
+# -----------------------------
+# 📷 INPUT OPTIONS
+# -----------------------------
+option = st.radio("Choose Input Method:", ["Upload Image", "Use Camera"])
 
-# Initialize OCR reader once (faster)
+image = None
+
+if option == "Upload Image":
+    uploaded_file = st.file_uploader("Upload Image", type=["png", "jpg", "jpeg"])
+    if uploaded_file:
+        image = Image.open(uploaded_file)
+
+elif option == "Use Camera":
+    camera_image = st.camera_input("Take a photo")
+    if camera_image:
+        image = Image.open(camera_image)
+
+# -----------------------------
+# LOAD OCR
+# -----------------------------
 @st.cache_resource
 def load_reader():
     return easyocr.Reader(['en'], gpu=False)
@@ -18,89 +35,76 @@ def load_reader():
 reader = load_reader()
 
 # -----------------------------
-# 🔥 MULTI PREPROCESSING
+# PROCESS IMAGE
 # -----------------------------
-def preprocess_variants(img):
-    variants = []
+if image is not None:
 
+    st.image(image, caption="Input Image", use_column_width=True)
+
+    img = np.array(image)
+    img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+
+    # -----------------------------
+    # 🔥 MULTI PREPROCESSING
+    # -----------------------------
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
 
-    # Variant 1: Normal threshold
+    variants = []
+
+    # Variant 1
     _, t1 = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
     variants.append(t1)
 
-    # Variant 2: Adaptive threshold
+    # Variant 2
     t2 = cv2.adaptiveThreshold(gray, 255,
                                cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
                                cv2.THRESH_BINARY, 11, 2)
     variants.append(t2)
 
-    # Variant 3: Blur + threshold
+    # Variant 3
     blur = cv2.GaussianBlur(gray, (5,5), 0)
     _, t3 = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
     variants.append(t3)
 
-    return variants
+    st.subheader("🧠 Processing Variants")
+    st.image(variants, width=200)
 
-
-# -----------------------------
-# 🤖 OCR WITH CONFIDENCE
-# -----------------------------
-def run_ocr_best(variants):
+    # -----------------------------
+    # 🤖 OCR BEST RESULT
+    # -----------------------------
     best_text = ""
     best_score = 0
     best_boxes = None
 
-    for img in variants:
-        result = reader.readtext(img)
-
-        text = " ".join([r[1] for r in result])
-        score = sum([r[2] for r in result]) if result else 0
-
-        if score > best_score:
-            best_score = score
-            best_text = text
-            best_boxes = result
-
-    return best_text, best_score, best_boxes
-
-
-if uploaded_file is not None:
-
-    image = Image.open(uploaded_file)
-    st.image(image, caption="Uploaded Image", use_column_width=True)
-
-    img = np.array(image)
-    img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
-
-    # Preprocessing
-    variants = preprocess_variants(img)
-
-    st.subheader("🧠 Trying Multiple Enhancements...")
-    st.image(variants, caption=["Variant 1", "Variant 2", "Variant 3"], width=200)
-
-    # OCR
     with st.spinner("Analyzing..."):
-        text, score, boxes = run_ocr_best(variants)
+        for v in variants:
+            result = reader.readtext(v)
+
+            text = " ".join([r[1] for r in result])
+            score = sum([r[2] for r in result]) if result else 0
+
+            if score > best_score:
+                best_score = score
+                best_text = text
+                best_boxes = result
 
     # Clean text
-    text = re.sub(r'[^a-zA-Z0-9 ]', '', text)
+    best_text = re.sub(r'[^a-zA-Z0-9 ]', '', best_text)
 
     # -----------------------------
-    # 📊 OUTPUT
+    # OUTPUT
     # -----------------------------
-    st.success("✅ Best Prediction:")
-    st.write(text if text else "No text detected ❌")
+    st.success("✅ Prediction:")
+    st.write(best_text if best_text else "No text detected ❌")
 
-    st.info(f"Confidence Score: {round(score, 2)}")
+    st.info(f"Confidence Score: {round(best_score, 2)}")
 
     # -----------------------------
-    # 📦 DRAW BOUNDING BOXES
+    # DRAW BOXES
     # -----------------------------
-    if boxes:
+    if best_boxes:
         drawn = img.copy()
-
-        for (bbox, txt, conf) in boxes:
+        for (bbox, txt, conf) in best_boxes:
             pts = np.array(bbox).astype(int)
             cv2.polylines(drawn, [pts], True, (0,255,0), 2)
 
@@ -108,11 +112,11 @@ if uploaded_file is not None:
         st.image(drawn, caption="Detected Text Regions")
 
     # -----------------------------
-    # 💾 DOWNLOAD
+    # DOWNLOAD
     # -----------------------------
     st.download_button(
         "📥 Download Text",
-        data=text,
+        data=best_text,
         file_name="output.txt",
         mime="text/plain"
     )
